@@ -5,24 +5,27 @@ import time
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple, Union
 from langchain_core.documents import Document
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from langchain_core.retrievers import BaseRetriever
 from pydantic import PrivateAttr
+import torch
 
 class RerankerModel:
     """Reranker模型封装类，用于对检索结果进行重排序"""
     
-    def __init__(self, model_name: str = "Qwen/Qwen3-Reranker-0.6B", device: str = "cuda", batch_size: int = 8):
+    def __init__(self, model_name: str = "Qwen/Qwen3-Reranker-0.6B", device: str = "cuda", batch_size: int = 4, max_length: int = 8192):
         """初始化Reranker模型
         
         Args:
             model_name: 模型名称，默认使用Qwen/Qwen3-Reranker-0.6B
             device: 运行设备，默认使用CUDA
-            batch_size: 批处理大小，默认为8
+            batch_size: 批处理大小，默认为4
+            max_length: 最大序列长度，默认为8192
         """
         self.model_name = model_name
         self.device = device
         self.batch_size = batch_size
+        self.max_length = max_length
         
         # 如果没有CUDA，则使用CPU
         if self.device == "cuda" and not self._is_cuda_available():
@@ -31,9 +34,27 @@ class RerankerModel:
         
         try:
             print(f"正在加载qwen3-reranker模型: {model_name}...")
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-            self.model = AutoModelForSequenceClassification.from_pretrained(model_name).to(self.device)
+            # 按照官方示例配置tokenizer，设置padding_side为left
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side='left')
+            
+            # 加载模型并设置为评估模式
+            self.model = AutoModelForCausalLM.from_pretrained(model_name).to(self.device).eval()
             print(f"Qwen3-Reranker模型加载成功")
+            
+            # 获取yes和no的token id，用于计算相关性分数
+            self.token_true_id = self.tokenizer.convert_tokens_to_ids("yes")
+            self.token_false_id = self.tokenizer.convert_tokens_to_ids("no")
+            print(f"yes token id: {self.token_true_id}, no token id: {self.token_false_id}")
+            
+            # 定义前缀和后缀
+            self.prefix = "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n"
+            self.suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+            self.prefix_tokens = self.tokenizer.encode(self.prefix, add_special_tokens=False)
+            self.suffix_tokens = self.tokenizer.encode(self.suffix, add_special_tokens=False)
+            
+            # 默认指令
+            self.instruction = 'Given a web search query, retrieve relevant passages that answer the query'
+            
         except Exception as e:
             print(f"加载reranker模型时出错: {e}")
             raise
@@ -41,10 +62,75 @@ class RerankerModel:
     def _is_cuda_available(self) -> bool:
         """检查CUDA是否可用"""
         try:
-            import torch
             return torch.cuda.is_available()
         except ImportError:
             return False
+            
+    def format_instruction(self, query: str, doc: str) -> str:
+        """格式化指令、查询和文档
+        
+        Args:
+            query: 用户查询
+            doc: 文档内容
+            
+        Returns:
+            格式化后的输入字符串
+        """
+        return f"<Instruct>: {self.instruction}\n<Query>: {query}\n<Document>: {doc}"
+    
+    def process_inputs(self, pairs: List[str]) -> Dict[str, torch.Tensor]:
+        """处理输入对，添加前缀和后缀，并进行填充
+        
+        Args:
+            pairs: 格式化后的输入字符串列表
+            
+        Returns:
+            处理后的输入字典
+        """
+        # 将 prefix, pair, 和 suffix 组合成完整的输入字符串
+        full_inputs = [self.prefix + pair + self.suffix for pair in pairs]
+        
+        # 使用 __call__ 方法进行 tokenization 和 padding
+        # padding='longest' 会将批次中的序列填充到该批次中最长序列的长度，更节省内存
+        inputs = self.tokenizer(
+            full_inputs,
+            padding='longest',
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt"
+        )
+        
+        # 将输入移动到指定设备
+        for key in inputs:
+            inputs[key] = inputs[key].to(self.device)
+            
+        return inputs
+        
+    def compute_logits(self, inputs: Dict[str, torch.Tensor]) -> List[float]:
+        """计算相关性分数
+        
+        Args:
+            inputs: 处理后的输入字典
+            
+        Returns:
+            相关性分数列表
+        """
+        with torch.no_grad():
+            # 获取最后一个token的logits
+            batch_scores = self.model(**inputs).logits[:, -1, :]
+            
+            # 提取yes和no的logits
+            true_vector = batch_scores[:, self.token_true_id]
+            false_vector = batch_scores[:, self.token_false_id]
+            
+            # 堆叠logits并计算log softmax
+            batch_scores = torch.stack([false_vector, true_vector], dim=1)
+            batch_scores = torch.nn.functional.log_softmax(batch_scores, dim=1)
+            
+            # 返回yes的概率作为相关性分数
+            scores = batch_scores[:, 1].exp().tolist()
+            
+        return scores
     
     def rerank(self, query: str, documents: List[Document], top_k: int = None) -> List[Document]:
         """对检索到的文档进行重排序
@@ -71,23 +157,48 @@ class RerankerModel:
         try:
             import torch
             
+            print(f"开始处理 {len(texts)} 个文档，批处理大小: {self.batch_size}")
+            
             # 批处理文档以提高效率
             for i in range(0, len(texts), self.batch_size):
                 batch_texts = texts[i:i+self.batch_size]
-                # 为每个文档和查询对创建输入
-                inputs = self.tokenizer(
-                    [[query, text] for text in batch_texts],
-                    padding=True,
-                    truncation=True,
-                    return_tensors="pt"
-                ).to(self.device)
+                batch_size = len(batch_texts)
+                print(f"处理批次 {i//self.batch_size + 1}，包含 {batch_size} 个文档")
                 
-                # 计算分数
-                with torch.no_grad():
-                    outputs = self.model(**inputs)
-                    batch_scores = outputs.logits.flatten().cpu().numpy()
-                
-                scores.extend(batch_scores)
+                try:
+                    # 格式化输入
+                    pairs = [self.format_instruction(query, text) for text in batch_texts]
+                    
+                    # 处理输入
+                    inputs = self.process_inputs(pairs)
+                    
+                    # 计算相关性分数
+                    batch_scores = self.compute_logits(inputs)
+                    
+                    scores.extend(batch_scores)
+                    print(f"批次 {i//self.batch_size + 1} 处理完成")
+                except Exception as batch_error:
+                    print(f"处理批次 {i//self.batch_size + 1} 时出错: {batch_error}")
+                    # 如果批处理失败，尝试逐个处理文档
+                    if batch_size > 1:
+                        print("尝试逐个处理文档...")
+                        for j, text in enumerate(batch_texts):
+                            try:
+                                # 单个文档处理使用相同的方法
+                                pair = self.format_instruction(query, text)
+                                single_input = self.process_inputs([pair])
+                                single_score = self.compute_logits(single_input)
+                                
+                                scores.append(single_score[0])
+                                print(f"文档 {i+j+1}/{len(texts)} 处理成功")
+                            except Exception as single_error:
+                                print(f"处理单个文档 {i+j+1}/{len(texts)} 时出错: {single_error}")
+                                # 添加一个默认分数
+                                scores.append(0.0)
+                    else:
+                        # 单个文档处理失败，添加默认分数
+                        print(f"单个文档处理失败，添加默认分数")
+                        scores.append(0.0)
             
             print(f"Qwen3-Reranker计算完成，耗时: {time.time() - start_time:.2f}秒")
         except Exception as e:
@@ -107,7 +218,6 @@ class RerankerModel:
         if top_k is not None and top_k > 0:
             return sorted_documents[:top_k]
         return sorted_documents
-
 
 class RerankerRetriever(BaseRetriever):
     """结合向量检索和Reranker的检索器，继承自BaseRetriever以支持管道操作"""
@@ -168,7 +278,6 @@ class RerankerRetriever(BaseRetriever):
         except Exception as e:
             print(f"Reranker重排序时出错: {e}，将返回原始向量检索结果")
             return vector_docs[:self._top_k_final]  # 出错时返回前top_k_final个文档
-
 
 class AccuracyEvaluator:
     """准确率评估器，用于评估检索系统的准确率"""
