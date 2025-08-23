@@ -228,7 +228,7 @@ class RerankerRetriever(BaseRetriever):
     _top_k_vector = PrivateAttr(default=20)
     _top_k_final = PrivateAttr(default=5)
     
-    def __init__(self, vector_retriever, reranker: Optional[RerankerModel] = None, top_k_vector: int = 20, top_k_final: int = 5):
+    def __init__(self, vector_retriever, reranker: Optional[RerankerModel] = None, top_k_vector: int = 20, top_k_final: int = 5, evaluator: Optional['AccuracyEvaluator'] = None):
         """初始化检索器
         
         Args:
@@ -242,6 +242,7 @@ class RerankerRetriever(BaseRetriever):
         self._reranker = reranker
         self._top_k_vector = top_k_vector
         self._top_k_final = top_k_final
+        self._evaluator = evaluator
         
         # 记录reranker状态
         print(f"RerankerRetriever初始化，reranker模型: {'已加载' if reranker else '未加载/禁用'}")
@@ -262,22 +263,40 @@ class RerankerRetriever(BaseRetriever):
         vector_docs = self._vector_retriever.get_relevant_documents(query)
         vector_time = time.time() - start_time
         print(f"向量检索完成，找到 {len(vector_docs)} 个文档，耗时: {vector_time:.2f}秒")
-        
+
+        # 如果有评估器，记录预重排序指标
+        if self._evaluator:
+            # 假设ground truth的query key与实际query相同，且相关文档ID从metadata中获取
+            # 这里需要根据实际的ground truth数据结构进行调整
+            # 为了演示，我们假设evaluator内部会处理ground truth的匹配
+            pre_rerank_metrics = self._evaluator.evaluate_retrieval(query, vector_docs)
+            print(f"预重排序指标: {pre_rerank_metrics}")
+            # 将指标存储到session_state中，以便在app.py中显示
+            # 注意：这里直接修改了evaluator的内部状态，app.py中可以直接读取
+            # 如果需要更明确的传递，可以考虑返回metrics或者通过其他方式更新session_state
+
         # 检查reranker是否为None
         if self._reranker is None:
             print("Reranker模型为None，跳过重排序，直接返回向量检索结果")
-            return vector_docs[:self._top_k_final]  # 返回前top_k_final个文档
-        
-        # 第二阶段：使用reranker重排序
-        try:
-            start_time = time.time()
-            reranked_docs = self._reranker.rerank(query, vector_docs, self._top_k_final)
-            rerank_time = time.time() - start_time
-            print(f"Reranker重排序完成，返回 {len(reranked_docs)} 个文档，耗时: {rerank_time:.2f}秒")
-            return reranked_docs
-        except Exception as e:
-            print(f"Reranker重排序时出错: {e}，将返回原始向量检索结果")
-            return vector_docs[:self._top_k_final]  # 出错时返回前top_k_final个文档
+            final_docs = vector_docs[:self._top_k_final]
+        else:
+            # 第二阶段：使用reranker重排序
+            try:
+                start_time = time.time()
+                reranked_docs = self._reranker.rerank(query, vector_docs, self._top_k_final)
+                rerank_time = time.time() - start_time
+                print(f"Reranker重排序完成，返回 {len(reranked_docs)} 个文档，耗时: {rerank_time:.2f}秒")
+                final_docs = reranked_docs
+            except Exception as e:
+                print(f"Reranker重排序时出错: {e}，将返回原始向量检索结果")
+                final_docs = vector_docs[:self._top_k_final]  # 出错时返回前top_k_final个文档
+
+        # 如果有评估器，记录后重排序指标
+        if self._evaluator:
+            post_rerank_metrics = self._evaluator.evaluate_retrieval(query, final_docs)
+            print(f"后重排序指标: {post_rerank_metrics}")
+
+        return final_docs
 
 class AccuracyEvaluator:
     """准确率评估器，用于评估检索系统的准确率"""
@@ -291,24 +310,42 @@ class AccuracyEvaluator:
             'mrr_sum': 0,
             'ndcg_sum': 0
         }
-    
-    def evaluate_retrieval(self, query: str, retrieved_docs: List[Document], 
-                          relevant_docs: List[str] = None, relevance_scores: Dict[str, float] = None) -> Dict[str, float]:
+        self.ground_truth = {}
+    def add_ground_truth(self, query: str, relevant_docs: List[str], relevance_scores: Dict[str, float] = None):
+        """添加人工标注的ground truth数据
+
+        Args:
+            query: 用户查询
+            relevant_docs: 相关文档ID列表
+            relevance_scores: 文档ID到相关性分数的映射
+        """
+        self.ground_truth[query] = {
+            'relevant_docs': relevant_docs,
+            'relevance_scores': relevance_scores if relevance_scores is not None else {}
+        }
+        print(f"已为查询 '{query}' 添加ground truth数据")
+
+    def get_ground_truth(self, query: str) -> Optional[Dict[str, Any]]:
+        """获取指定查询的ground truth数据"""
+        return self.ground_truth.get(query)
+
+    def evaluate_retrieval(self, query: str, retrieved_docs: List[Document]) -> Dict[str, float]:
         """评估检索结果的准确率
-        
+
         Args:
             query: 用户查询
             retrieved_docs: 检索到的文档列表
-            relevant_docs: 相关文档ID列表，如果为None则使用人工评估
-            relevance_scores: 文档ID到相关性分数的映射，用于计算NDCG
-            
+
         Returns:
             评估指标字典
         """
-        # 如果没有提供相关文档，则需要人工评估
-        if relevant_docs is None:
-            print("未提供相关文档列表，无法自动评估准确率")
-            return {}
+        gt_data = self.get_ground_truth(query)
+        if not gt_data:
+            print(f"查询 '{query}' 没有找到ground truth数据，无法评估准确率")
+            return {} # 如果没有ground truth，则无法评估
+
+        relevant_docs = gt_data['relevant_docs']
+        relevance_scores = gt_data['relevance_scores']
         
         # 获取检索到的文档ID
         retrieved_ids = [doc.metadata.get('id', '') for doc in retrieved_docs]
@@ -393,7 +430,6 @@ class AccuracyEvaluator:
         total = self.metrics['total_queries']
         if total == 0:
             return {}
-        
         return {
             'avg_precision': self.metrics['precision_sum'] / total,
             'avg_recall': self.metrics['recall_sum'] / total,
@@ -411,3 +447,4 @@ class AccuracyEvaluator:
             'mrr_sum': 0,
             'ndcg_sum': 0
         }
+        self.ground_truth = {}

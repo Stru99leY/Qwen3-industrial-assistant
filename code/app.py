@@ -7,6 +7,7 @@ import traceback
 from langchain_huggingface import HuggingFaceEmbeddings
 from main import load_and_split_documents, create_vector_store
 from reranker import RerankerModel, RerankerRetriever, AccuracyEvaluator
+import json
 
 # 设置日志级别，增加终端输出
 DEBUG = True
@@ -138,6 +139,9 @@ def get_context_retriever_chain(_vector_store, embeddings):
         reranker = get_reranker_model()
         log(f"获取到的reranker模型: {reranker}")
         
+        # 获取评估器
+        evaluator = st.session_state.get('evaluator')
+
         if reranker is not None:
             log("使用Reranker增强检索")
             # 创建增强检索器 - 两阶段检索：先向量检索，再重排序
@@ -146,7 +150,8 @@ def get_context_retriever_chain(_vector_store, embeddings):
                     vector_retriever=base_retriever,  # 基础向量检索器
                     reranker=reranker,               # 重排序模型
                     top_k_vector=20,                 # 向量检索返回的文档数量
-                    top_k_final=5                    # 最终返回的文档数量
+                    top_k_final=5,                   # 最终返回的文档数量
+                    evaluator=evaluator
                 )
                 log("Reranker增强检索器创建成功")
             except Exception as e:
@@ -238,7 +243,7 @@ with st.sidebar:
     # GPU配置
     st.subheader("硬件配置")
     if 'use_gpu' not in st.session_state:
-        st.session_state.use_gpu = False
+        st.session_state.use_gpu = True
     
     use_gpu = st.checkbox("使用GPU加速", value=st.session_state.use_gpu)
     if use_gpu != st.session_state.use_gpu:
@@ -258,6 +263,34 @@ with st.sidebar:
     # 初始化评估器
     if 'evaluator' not in st.session_state:
         st.session_state.evaluator = AccuracyEvaluator()
+    # 提供评估数据导入入口
+    gt_file = st.file_uploader("导入评估数据(JSON)", type=["json"], help="格式示例: {\n  '你的查询': { 'relevant_docs': ['doc1','doc2'], 'relevance_scores': {'doc1':1.0,'doc2':0.8} }\n}")
+    if gt_file is not None:
+        try:
+            gt_data = json.load(gt_file)
+            loaded = 0
+            # 支持两种格式：
+            # 1) { query: { 'relevant_docs': [...], 'relevance_scores': {...} }, ... }
+            # 2) { 'queries': [ { 'query': '...', 'relevant_doc_ids': [...], 'relevance_scores': {...} }, ... ] }
+            if isinstance(gt_data, dict) and 'queries' in gt_data and isinstance(gt_data['queries'], list):
+                for item in gt_data['queries']:
+                    q = item.get('query')
+                    ids = item.get('relevant_doc_ids') or item.get('relevant_docs') or []
+                    scores = item.get('relevance_scores') or {}
+                    if q and ids:
+                        st.session_state.evaluator.add_ground_truth(q, ids, scores)
+                        loaded += 1
+            elif isinstance(gt_data, dict):
+                for q, v in gt_data.items():
+                    if isinstance(v, dict):
+                        ids = v.get('relevant_docs') or v.get('relevant_doc_ids') or []
+                        scores = v.get('relevance_scores') or {}
+                        if q and ids:
+                            st.session_state.evaluator.add_ground_truth(q, ids, scores)
+                            loaded += 1
+            st.success(f"已导入评估查询 {loaded} 条")
+        except Exception as e:
+            st.error(f"评估数据导入失败: {e}")
     
     # 重置评估指标按钮
     if st.button("重置评估指标"):
@@ -389,15 +422,37 @@ try:
                             
                             with col2:
                                 st.subheader("准确率指标")
-                                # 获取整体评估指标
-                                metrics = st.session_state.evaluator.get_overall_metrics()
-                                if metrics:
-                                    st.metric("平均准确率", f"{metrics.get('avg_precision', 0):.4f}")
-                                    st.metric("平均召回率", f"{metrics.get('avg_recall', 0):.4f}")
-                                    st.metric("平均MRR", f"{metrics.get('avg_mrr', 0):.4f}")
-                                    st.metric("平均NDCG", f"{metrics.get('avg_ndcg', 0):.4f}")
+                                # 获取评估指标
+                                pre_metrics = st.session_state.get('pre_rerank_metrics', {})
+                                post_metrics = st.session_state.get('post_rerank_metrics', {})
+
+                                if pre_metrics or post_metrics:
+                                    st.write("**Reranker前:**")
+                                    if pre_metrics:
+                                        st.metric("准确率", f"{pre_metrics.get('precision', 0):.4f}")
+                                        st.metric("召回率", f"{pre_metrics.get('recall', 0):.4f}")
+                                    else:
+                                        st.info("无Reranker前评估数据")
+
+                                    st.write("**Reranker后:**")
+                                    if post_metrics:
+                                        st.metric("准确率", f"{post_metrics.get('precision', 0):.4f}")
+                                        st.metric("召回率", f"{post_metrics.get('recall', 0):.4f}")
+                                    else:
+                                        st.info("无Reranker后评估数据")
                                 else:
                                     st.info("暂无评估数据")
+                                     
+                                 
+                                overall_metrics = st.session_state.evaluator.get_overall_metrics()
+                                if overall_metrics:
+                                    st.write("**整体评估指标**")
+                                    st.metric("平均准确率", f"{overall_metrics.get('avg_precision', 0):.4f}")
+                                    st.metric("平均召回率", f"{overall_metrics.get('avg_recall', 0):.4f}")
+                                    st.metric("平均MRR", f"{overall_metrics.get('avg_mrr', 0):.4f}")
+                                    st.metric("平均NDCG", f"{overall_metrics.get('avg_ndcg', 0):.4f}")
+                                    st.metric("F1分数", f"{overall_metrics.get('avg_f1', 0):.4f}")
+
                                     
                             # 添加人工评估按钮
                             st.subheader("人工评估")
