@@ -228,7 +228,7 @@ class RerankerRetriever(BaseRetriever):
     _top_k_vector = PrivateAttr(default=20)
     _top_k_final = PrivateAttr(default=5)
     
-    def __init__(self, vector_retriever, reranker: Optional[RerankerModel] = None, top_k_vector: int = 20, top_k_final: int = 5, evaluator: Optional['AccuracyEvaluator'] = None):
+    def __init__(self, vector_retriever, reranker: Optional[RerankerModel] = None, top_k_vector: int = 20, top_k_final: int = 5):
         """初始化检索器
         
         Args:
@@ -242,7 +242,6 @@ class RerankerRetriever(BaseRetriever):
         self._reranker = reranker
         self._top_k_vector = top_k_vector
         self._top_k_final = top_k_final
-        self._evaluator = evaluator
         
         # 记录reranker状态
         print(f"RerankerRetriever初始化，reranker模型: {'已加载' if reranker else '未加载/禁用'}")
@@ -264,17 +263,6 @@ class RerankerRetriever(BaseRetriever):
         vector_time = time.time() - start_time
         print(f"向量检索完成，找到 {len(vector_docs)} 个文档，耗时: {vector_time:.2f}秒")
 
-        # 如果有评估器，记录预重排序指标
-        if self._evaluator:
-            # 假设ground truth的query key与实际query相同，且相关文档ID从metadata中获取
-            # 这里需要根据实际的ground truth数据结构进行调整
-            # 为了演示，我们假设evaluator内部会处理ground truth的匹配
-            pre_rerank_metrics = self._evaluator.evaluate_retrieval(query, vector_docs)
-            print(f"预重排序指标: {pre_rerank_metrics}")
-            # 将指标存储到session_state中，以便在app.py中显示
-            # 注意：这里直接修改了evaluator的内部状态，app.py中可以直接读取
-            # 如果需要更明确的传递，可以考虑返回metrics或者通过其他方式更新session_state
-
         # 检查reranker是否为None
         if self._reranker is None:
             print("Reranker模型为None，跳过重排序，直接返回向量检索结果")
@@ -291,160 +279,6 @@ class RerankerRetriever(BaseRetriever):
                 print(f"Reranker重排序时出错: {e}，将返回原始向量检索结果")
                 final_docs = vector_docs[:self._top_k_final]  # 出错时返回前top_k_final个文档
 
-        # 如果有评估器，记录后重排序指标
-        if self._evaluator:
-            post_rerank_metrics = self._evaluator.evaluate_retrieval(query, final_docs)
-            print(f"后重排序指标: {post_rerank_metrics}")
-
         return final_docs
 
-class AccuracyEvaluator:
-    """准确率评估器，用于评估检索系统的准确率"""
-    
-    def __init__(self):
-        self.metrics = {
-            'total_queries': 0,
-            'relevant_retrieved': 0,
-            'precision_sum': 0,
-            'recall_sum': 0,
-            'mrr_sum': 0,
-            'ndcg_sum': 0
-        }
-        self.ground_truth = {}
-    def add_ground_truth(self, query: str, relevant_docs: List[str], relevance_scores: Dict[str, float] = None):
-        """添加人工标注的ground truth数据
-
-        Args:
-            query: 用户查询
-            relevant_docs: 相关文档ID列表
-            relevance_scores: 文档ID到相关性分数的映射
-        """
-        self.ground_truth[query] = {
-            'relevant_docs': relevant_docs,
-            'relevance_scores': relevance_scores if relevance_scores is not None else {}
-        }
-        print(f"已为查询 '{query}' 添加ground truth数据")
-
-    def get_ground_truth(self, query: str) -> Optional[Dict[str, Any]]:
-        """获取指定查询的ground truth数据"""
-        return self.ground_truth.get(query)
-
-    def evaluate_retrieval(self, query: str, retrieved_docs: List[Document]) -> Dict[str, float]:
-        """评估检索结果的准确率
-
-        Args:
-            query: 用户查询
-            retrieved_docs: 检索到的文档列表
-
-        Returns:
-            评估指标字典
-        """
-        gt_data = self.get_ground_truth(query)
-        if not gt_data:
-            print(f"查询 '{query}' 没有找到ground truth数据，无法评估准确率")
-            return {} # 如果没有ground truth，则无法评估
-
-        relevant_docs = gt_data['relevant_docs']
-        relevance_scores = gt_data['relevance_scores']
-        
-        # 获取检索到的文档ID
-        retrieved_ids = [doc.metadata.get('id', '') for doc in retrieved_docs]
-        
-        # 计算相关文档被检索到的数量
-        relevant_retrieved = sum(1 for doc_id in retrieved_ids if doc_id in relevant_docs)
-        
-        # 计算准确率指标
-        precision = relevant_retrieved / len(retrieved_docs) if retrieved_docs else 0
-        recall = relevant_retrieved / len(relevant_docs) if relevant_docs else 0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-        
-        # 计算MRR (Mean Reciprocal Rank)
-        mrr = 0
-        for i, doc_id in enumerate(retrieved_ids):
-            if doc_id in relevant_docs:
-                mrr = 1.0 / (i + 1)
-                break
-        
-        # 计算NDCG (Normalized Discounted Cumulative Gain)
-        ndcg = self._calculate_ndcg(retrieved_ids, relevance_scores) if relevance_scores else 0
-        
-        # 更新累计指标
-        self.metrics['total_queries'] += 1
-        self.metrics['relevant_retrieved'] += relevant_retrieved
-        self.metrics['precision_sum'] += precision
-        self.metrics['recall_sum'] += recall
-        self.metrics['mrr_sum'] += mrr
-        self.metrics['ndcg_sum'] += ndcg
-        
-        # 返回当前查询的评估结果
-        return {
-            'precision': precision,
-            'recall': recall,
-            'f1': f1,
-            'mrr': mrr,
-            'ndcg': ndcg
-        }
-    
-    def _calculate_ndcg(self, retrieved_ids: List[str], relevance_scores: Dict[str, float], k: int = None) -> float:
-        """计算NDCG (Normalized Discounted Cumulative Gain)
-        
-        Args:
-            retrieved_ids: 检索到的文档ID列表
-            relevance_scores: 文档ID到相关性分数的映射
-            k: 计算NDCG@k，如果为None则计算所有文档
-            
-        Returns:
-            NDCG值
-        """
-        if not retrieved_ids or not relevance_scores:
-            return 0.0
-        
-        # 限制k
-        if k is not None:
-            retrieved_ids = retrieved_ids[:k]
-        
-        # 计算DCG
-        dcg = 0.0
-        for i, doc_id in enumerate(retrieved_ids):
-            rel = relevance_scores.get(doc_id, 0.0)
-            dcg += rel / np.log2(i + 2)  # i+2 是因为log2(1)=0
-        
-        # 计算IDCG (理想DCG)
-        ideal_ordering = sorted(relevance_scores.values(), reverse=True)
-        if k is not None:
-            ideal_ordering = ideal_ordering[:k]
-        
-        idcg = 0.0
-        for i, rel in enumerate(ideal_ordering):
-            idcg += rel / np.log2(i + 2)
-        
-        # 计算NDCG
-        return dcg / idcg if idcg > 0 else 0.0
-    
-    def get_overall_metrics(self) -> Dict[str, float]:
-        """获取整体评估指标
-        
-        Returns:
-            整体评估指标字典
-        """
-        total = self.metrics['total_queries']
-        if total == 0:
-            return {}
-        return {
-            'avg_precision': self.metrics['precision_sum'] / total,
-            'avg_recall': self.metrics['recall_sum'] / total,
-            'avg_mrr': self.metrics['mrr_sum'] / total,
-            'avg_ndcg': self.metrics['ndcg_sum'] / total
-        }
-    
-    def reset_metrics(self) -> None:
-        """重置评估指标"""
-        self.metrics = {
-            'total_queries': 0,
-            'relevant_retrieved': 0,
-            'precision_sum': 0,
-            'recall_sum': 0,
-            'mrr_sum': 0,
-            'ndcg_sum': 0
-        }
-        self.ground_truth = {}
+# 评估器已移至独立的scoring_system.py模块

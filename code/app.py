@@ -6,8 +6,7 @@ import time
 import traceback
 from langchain_huggingface import HuggingFaceEmbeddings
 from main import load_and_split_documents, create_vector_store
-from reranker import RerankerModel, RerankerRetriever, AccuracyEvaluator
-import json
+from reranker import RerankerModel, RerankerRetriever
 
 # 设置日志级别，增加终端输出
 DEBUG = True
@@ -29,12 +28,23 @@ st.title("🤖 工业知识问答助手 v3.0 (支持连续对话 + Reranker增�
 
 # --- 核心功能函数 ---
 
-# 使用Streamlit的缓存功能，避免每次都重新加载和创建向量库
-@st.cache_resource
+def get_project_root():
+    """获取项目根目录"""
+    current_dir = os.getcwd()
+    if os.path.basename(current_dir) == "code":
+        # 如果在code目录中，需要回到上级目录
+        return os.path.dirname(current_dir)
+    else:
+        return current_dir
+
+# 不使用缓存，确保每次都重新检查索引状态
 def get_vector_store():
     """创建并缓存向量数据库，返回向量库和嵌入模型实例"""
-    KNOWLEDGE_BASE_DIR = "data/file"
-    INDEX_PATH = "data/INDEX"  # 统一使用大写，与main.py保持一致
+    # 获取项目根目录
+    project_root = get_project_root()
+    
+    KNOWLEDGE_BASE_DIR = os.path.join(project_root, "data", "file")
+    INDEX_PATH = os.path.join(project_root, "data", "INDEX")  # 统一使用大写，与main.py保持一致
     MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"  # 显式指定嵌入模型，与main.py保持一致
     
     # 打印当前工作目录和INDEX_PATH的绝对路径
@@ -47,6 +57,13 @@ def get_vector_store():
     
     # 显式配置嵌入模型参数，确保与main.py一致
     embeddings = HuggingFaceEmbeddings(model_name=MODEL_NAME)
+    
+    # 强制重建索引的逻辑
+    force_rebuild = st.session_state.get('force_rebuild_index', False)
+    
+    # 检查是否需要重建索引
+    need_rebuild = False
+    
     # 输出嵌入模型维度信息，用于调试
     try:
         # 使用一个简单的句子测试嵌入维度
@@ -54,41 +71,73 @@ def get_vector_store():
         embedding_dim = len(test_embedding)
         st.write(f"嵌入模型维度: {embedding_dim}")
         log(f"嵌入模型维度: {embedding_dim}")
+        
+        # 如果索引存在且不是强制重建，检查维度是否匹配
+        if os.path.exists(INDEX_PATH) and not force_rebuild:
+            try:
+                # 尝试加载索引来检查维度
+                temp_db = create_vector_store(None, model_name=MODEL_NAME, index_path=INDEX_PATH, embeddings=embeddings)
+                log("索引维度检查通过")
+            except Exception as dim_check_e:
+                if "assert d == self.d" in str(dim_check_e):
+                    log(f"索引维度不匹配，需要重建: {dim_check_e}")
+                    need_rebuild = True
+                else:
+                    log(f"索引检查出错: {dim_check_e}")
+                    need_rebuild = True
+        
     except Exception as e:
         st.error(f"获取嵌入模型维度时出错: {e}")
         log(f"获取嵌入模型维度时出错: {e}")
+        need_rebuild = True
     
-    if not os.path.exists(INDEX_PATH):
-        st.info("首次运行或知识库更新：正在创建新的向量索引，请稍候...")
-        log("索引路径不存在，开始创建新索引...")
+    # 如果需要重建或索引不存在，则创建新索引
+    if need_rebuild or not os.path.exists(INDEX_PATH) or force_rebuild:
+        if need_rebuild or force_rebuild:
+            st.warning("正在重建索引...")
+            # 删除旧的索引文件
+            try:
+                import shutil
+                if os.path.exists(INDEX_PATH):
+                    shutil.rmtree(INDEX_PATH)
+                    log("旧索引已删除")
+                    st.success("旧索引已删除")
+            except Exception as del_e:
+                log(f"删除旧索引失败: {del_e}")
+                st.error(f"删除旧索引失败: {del_e}")
+        else:
+            st.info("首次运行或知识库更新：正在创建新的向量索引，请稍候...")
+        
+        log("开始创建新索引...")
         try:
             docs = load_and_split_documents(KNOWLEDGE_BASE_DIR)
             log(f"成功加载并切分文档，共 {len(docs)} 个文档块")
             db = create_vector_store(docs, model_name=MODEL_NAME, index_path=INDEX_PATH, embeddings=embeddings)
             log("向量库创建成功")
-            st.success("知识库已成功创建！")  # 明确是创建而不是加载
+            st.success("知识库已成功创建！")
+            
+            # 重置强制重建标志
+            if force_rebuild:
+                st.session_state.force_rebuild_index = False
+                
         except Exception as e:
             log(f"创建向量库时出错: {str(e)}")
             log(f"错误堆栈:\n{traceback.format_exc()}")
             st.error(f"创建知识库时出错: {e}")
             raise
     else:
-        # 如果索引已存在，直接加载
-        log("索引路径存在，开始加载索引...")
+        # 索引存在且维度匹配，直接加载
+        log("索引路径存在且维度匹配，开始加载索引...")
         try:
             db = create_vector_store(None, model_name=MODEL_NAME, index_path=INDEX_PATH, embeddings=embeddings)
             log("向量库加载成功")
-            st.success("知识库已成功加载！")  # 明确是加载
+            st.success("知识库已成功加载！")
         except Exception as e:
-            # 如果是维度不匹配错误，提示用户重建索引
-            if "assert d == self.d" in str(e):
-                st.error(f"加载知识库时出错: {e}\n\n这可能是由于嵌入模型维度不匹配导致的。请勾选'强制重建知识库索引'复选框，然后刷新页面。")
-                log(f"维度不匹配错误: {e}")
-            else:
-                st.error(f"加载知识库时出错: {e}")
-                log(f"加载向量库时出错: {str(e)}")
-                log(f"错误堆栈:\n{traceback.format_exc()}")
+            log(f"加载向量库时出错: {str(e)}")
+            log(f"错误堆栈:\n{traceback.format_exc()}")
+            st.error(f"加载知识库时出错: {e}")
             raise
+    
     return db, embeddings
 
 # 不使用缓存，确保每次都根据当前状态决定是否加载模型
@@ -139,9 +188,6 @@ def get_context_retriever_chain(_vector_store, embeddings):
         reranker = get_reranker_model()
         log(f"获取到的reranker模型: {reranker}")
         
-        # 获取评估器
-        evaluator = st.session_state.get('evaluator')
-
         if reranker is not None:
             log("使用Reranker增强检索")
             # 创建增强检索器 - 两阶段检索：先向量检索，再重排序
@@ -150,8 +196,7 @@ def get_context_retriever_chain(_vector_store, embeddings):
                     vector_retriever=base_retriever,  # 基础向量检索器
                     reranker=reranker,               # 重排序模型
                     top_k_vector=20,                 # 向量检索返回的文档数量
-                    top_k_final=5,                   # 最终返回的文档数量
-                    evaluator=evaluator
+                    top_k_final=5                    # 最终返回的文档数量
                 )
                 log("Reranker增强检索器创建成功")
             except Exception as e:
@@ -250,52 +295,28 @@ with st.sidebar:
         st.session_state.use_gpu = use_gpu
         st.rerun()  # 重新运行应用以应用更改（注：st.experimental_rerun()已弃用，改用st.rerun()）
     
-    # 准确率评估
-    st.subheader("准确率评估")
-    if 'show_metrics' not in st.session_state:
-        st.session_state.show_metrics = False
+
     
-    show_metrics = st.checkbox("显示准确率指标", value=st.session_state.show_metrics)
-    if show_metrics != st.session_state.show_metrics:
-        st.session_state.show_metrics = show_metrics
-        st.rerun()  # 重新运行应用以应用更改（注：st.experimental_rerun()已弃用，改用st.rerun()）
+    # 索引管理
+    st.subheader("🗄️ 索引管理")
     
-    # 初始化评估器
-    if 'evaluator' not in st.session_state:
-        st.session_state.evaluator = AccuracyEvaluator()
-    # 提供评估数据导入入口
-    gt_file = st.file_uploader("导入评估数据(JSON)", type=["json"], help="格式示例: {\n  '你的查询': { 'relevant_docs': ['doc1','doc2'], 'relevance_scores': {'doc1':1.0,'doc2':0.8} }\n}")
-    if gt_file is not None:
+    # 强制重建索引选项
+    if st.checkbox("强制重建索引", help="勾选后将强制重建索引，解决维度不匹配问题"):
+        st.session_state.force_rebuild_index = True
+        st.warning("已启用强制重建索引，请刷新页面")
+    
+    if st.button("🔄 重建知识库索引"):
         try:
-            gt_data = json.load(gt_file)
-            loaded = 0
-            # 支持两种格式：
-            # 1) { query: { 'relevant_docs': [...], 'relevance_scores': {...} }, ... }
-            # 2) { 'queries': [ { 'query': '...', 'relevant_doc_ids': [...], 'relevance_scores': {...} }, ... ] }
-            if isinstance(gt_data, dict) and 'queries' in gt_data and isinstance(gt_data['queries'], list):
-                for item in gt_data['queries']:
-                    q = item.get('query')
-                    ids = item.get('relevant_doc_ids') or item.get('relevant_docs') or []
-                    scores = item.get('relevance_scores') or {}
-                    if q and ids:
-                        st.session_state.evaluator.add_ground_truth(q, ids, scores)
-                        loaded += 1
-            elif isinstance(gt_data, dict):
-                for q, v in gt_data.items():
-                    if isinstance(v, dict):
-                        ids = v.get('relevant_docs') or v.get('relevant_doc_ids') or []
-                        scores = v.get('relevance_scores') or {}
-                        if q and ids:
-                            st.session_state.evaluator.add_ground_truth(q, ids, scores)
-                            loaded += 1
-            st.success(f"已导入评估查询 {loaded} 条")
+            import shutil
+            INDEX_PATH = os.path.join(get_project_root(), "data", "INDEX")
+            if os.path.exists(INDEX_PATH):
+                shutil.rmtree(INDEX_PATH)
+                st.success("索引已删除，请刷新页面重建")
+                st.rerun()
+            else:
+                st.info("索引不存在，无需删除")
         except Exception as e:
-            st.error(f"评估数据导入失败: {e}")
-    
-    # 重置评估指标按钮
-    if st.button("重置评估指标"):
-        st.session_state.evaluator.reset_metrics()
-        st.success("评估指标已重置")
+            st.error(f"重建索引失败: {e}")
 
 # --- 主程序 ---
 
@@ -327,6 +348,8 @@ try:
         with st.chat_message("AI" if isinstance(message, AIMessage) else "Human"):
             st.markdown(message.content)
     log("聊天历史渲染完成")
+    
+
 
     # 5. 获取用户输入
     log("步骤5: 等待用户输入...")
@@ -405,77 +428,7 @@ try:
                     st.session_state.chat_history.append(AIMessage(content=final_answer))
                     log("回答已添加到聊天历史")
                     
-                    # 显示性能指标
-                    if st.session_state.show_metrics:
-                        with st.expander("性能与准确率指标"):
-                            col1, col2 = st.columns(2)
-                            
-                            with col1:
-                                st.subheader("性能指标")
-                                st.metric("总响应时间", f"{response_time:.2f}秒")
-                                
-                                # 如果使用了reranker，显示reranker相关指标
-                                if st.session_state.use_reranker:
-                                    st.metric("Reranker状态", "已启用")
-                                else:
-                                    st.metric("Reranker状态", "已禁用")
-                            
-                            with col2:
-                                st.subheader("准确率指标")
-                                # 获取评估指标
-                                pre_metrics = st.session_state.get('pre_rerank_metrics', {})
-                                post_metrics = st.session_state.get('post_rerank_metrics', {})
 
-                                if pre_metrics or post_metrics:
-                                    st.write("**Reranker前:**")
-                                    if pre_metrics:
-                                        st.metric("准确率", f"{pre_metrics.get('precision', 0):.4f}")
-                                        st.metric("召回率", f"{pre_metrics.get('recall', 0):.4f}")
-                                    else:
-                                        st.info("无Reranker前评估数据")
-
-                                    st.write("**Reranker后:**")
-                                    if post_metrics:
-                                        st.metric("准确率", f"{post_metrics.get('precision', 0):.4f}")
-                                        st.metric("召回率", f"{post_metrics.get('recall', 0):.4f}")
-                                    else:
-                                        st.info("无Reranker后评估数据")
-                                else:
-                                    st.info("暂无评估数据")
-                                     
-                                 
-                                overall_metrics = st.session_state.evaluator.get_overall_metrics()
-                                if overall_metrics:
-                                    st.write("**整体评估指标**")
-                                    st.metric("平均准确率", f"{overall_metrics.get('avg_precision', 0):.4f}")
-                                    st.metric("平均召回率", f"{overall_metrics.get('avg_recall', 0):.4f}")
-                                    st.metric("平均MRR", f"{overall_metrics.get('avg_mrr', 0):.4f}")
-                                    st.metric("平均NDCG", f"{overall_metrics.get('avg_ndcg', 0):.4f}")
-                                    st.metric("F1分数", f"{overall_metrics.get('avg_f1', 0):.4f}")
-
-                                    
-                            # 添加人工评估按钮
-                            st.subheader("人工评估")
-                            relevance = st.slider("回答相关性评分", 0.0, 5.0, 3.0, 0.5)
-                            if st.button("提交评估"):
-                                # 创建一个简单的评估记录
-                                query_id = len(st.session_state.get('evaluations', []))
-                                if 'evaluations' not in st.session_state:
-                                    st.session_state.evaluations = []
-                                
-                                # 添加评估记录
-                                st.session_state.evaluations.append({
-                                    'query': PROMPT,
-                                    'answer': final_answer,
-                                    'relevance': relevance
-                                })
-                                
-                                # 更新评估指标
-                                st.session_state.evaluator.metrics['total_queries'] += 1
-                                st.session_state.evaluator.metrics['precision_sum'] += (relevance / 5.0)
-                                
-                                st.success(f"评估已提交，当前评分: {relevance}/5.0")
-                                st.rerun()  # 刷新页面显示更新后的指标（注：st.experimental_rerun()已弃用，改用st.rerun()）
                 except Exception as rag_e:
                     log(f"RAG链调用出错: {str(rag_e)}")
                     log(f"错误堆栈:\n{traceback.format_exc()}")

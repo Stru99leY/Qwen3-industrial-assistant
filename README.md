@@ -1,50 +1,149 @@
-# Qwen3-Reranker 使用说明
+# Qwen3-Reranker 工业知识问答系统
 
-## 简介
+## 项目简介
 
-本项目实现了基于Qwen3-Reranker-0.6B模型的文档重排序功能，用于提高检索系统的准确性。该实现基于官方推荐的CausalLM用法，通过计算"yes/no"的概率作为相关性分数。
+本项目实现了基于Qwen3-Reranker-0.6B模型的工业知识问答系统，采用模块化架构设计，专注于核心的问答功能。
 
-## 模型加载
+## 系统架构
+
+### 核心模块
+
+1. **Reranker模块** (`code/reranker.py`)
+   - `RerankerModel`: 基于Qwen3-Reranker的文档重排序模型
+   - `RerankerRetriever`: 结合向量检索和重排序的检索器
+
+2. **主应用** (`code/app.py`)
+   - Streamlit Web界面
+   - 集成Reranker模块
+   - 支持连续对话和智能索引管理
+
+## 主要特性
+
+### 🎯 核心问答功能
+- 基于PDF文档的知识库问答
+- 支持连续对话，历史感知检索
+- 智能文档检索和重排序
+
+### 🚀 Reranker增强
+- 基于Qwen3-Reranker-0.6B模型
+- 两阶段检索：向量检索 + 重排序
+- 提高文档相关性准确性
+
+### 🛠️ 智能索引管理
+- 自动检测索引维度匹配
+- 一键重建损坏的索引
+- 支持强制重建索引
+
+### ⚙️ 灵活配置
+- 支持启用/禁用Reranker模型
+- 支持GPU/CPU切换
+- 简洁的用户界面
+
+## 快速开始
+
+### 1. 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. 启动应用
+
+```bash
+cd code
+streamlit run app.py
+```
+
+### 3. 使用系统
+
+1. 启用Reranker模型进行文档重排序
+2. 在聊天界面输入问题
+3. 系统自动检索相关文档并生成答案
+4. 支持连续对话，系统会记住对话历史
+
+
+
+### 基本用法
 
 ```python
-from reranker import RerankerModel
+from reranker import RerankerModel, RerankerRetriever
 
-# 初始化Reranker模型
-reranker = RerankerModel(
-    model_name="Qwen/Qwen3-Reranker-0.6B",  # 模型名称
-    device="cuda",                        # 运行设备，如果CUDA不可用会自动切换到CPU
-    batch_size=4,                        # 批处理大小
-    max_length=8192                      # 最大序列长度
+# 创建Reranker模型
+reranker = RerankerModel("Qwen/Qwen3-Reranker-0.6B")
+
+# 创建增强检索器
+retriever = RerankerRetriever(
+    vector_retriever=base_retriever,
+    reranker=reranker,
+    top_k_vector=20,
+    top_k_final=5
 )
-```
 
-## 文档重排序
+## 性能优化
 
+### 批处理配置
+- 调整`batch_size`参数优化内存使用
+- 根据GPU显存调整`max_length`参数
+- 支持CPU回退，确保系统稳定性
+
+### 检索优化
+- 两阶段检索：向量检索 + 重排序
+- 可配置检索数量：`top_k_vector` 和 `top_k_final`
+- 智能索引管理，自动检测和重建
+
+## 故障排除
+
+### 常见问题
+
+1. **CUDA内存不足**
+   - 减小`batch_size`参数
+   - 使用CPU模式运行
+
+2. **Reranker模型未加载**
+   - 检查模型是否正确下载
+   - 确认设备配置（GPU/CPU）
+
+3. **FAISS索引维度不匹配**
+   - 使用"强制重建索引"选项
+   - 运行`python emergency_fix.py`脚本
+
+### 调试模式
+
+启用详细日志输出：
 ```python
-# 假设documents是一个Document对象列表
-query = "用户查询"
-top_k = 5  # 返回的文档数量
-
-# 对文档进行重排序
-reranked_docs = reranker.rerank(query, documents, top_k)
-
-# 查看重排序结果
-for i, doc in enumerate(reranked_docs):
-    score = doc.metadata.get('reranker_score', 'N/A')
-    print(f"[{i+1}] 分数: {score:.4f} - 内容: {doc.page_content}")
+import logging
+logging.basicConfig(level=logging.DEBUG)
 ```
 
-## 实现细节
+## 贡献指南
 
-本实现基于官方推荐的CausalLM用法，主要包括以下步骤：
+欢迎提交Issue和Pull Request来改进项目：
 
-1. 使用`AutoModelForCausalLM`加载模型，而不是`SequenceClassification`头
-2. 使用特定的提示模板格式化输入
-3. 通过计算"yes"和"no"的概率作为相关性分数
-4. 支持批处理以提高效率
+1. Fork项目
+2. 创建特性分支
+3. 提交更改
+4. 推送到分支
+5. 创建Pull Request
 
-## 注意事项
+## 许可证
 
-- 模型需要较大的显存，如果显存不足，可以减小`batch_size`或使用CPU模式
-- 默认的`max_length`为8192，可以根据需要调整
-- 如果处理非常长的文档，可能需要进行文档分块处理
+本项目采用MIT许可证，详见LICENSE文件。
+
+## 更新日志
+
+### v3.0.0 (当前版本)
+- ✨ 重构系统架构，专注于核心问答功能
+- 🎯 集成Reranker增强检索
+- 🔧 智能索引管理，自动检测和重建
+- 🚀 支持连续对话，历史感知检索
+- 💻 简洁的用户界面，易于使用
+
+### v2.0.0
+- 集成Qwen3-Reranker模型
+- 支持文档重排序功能
+- 基础评估指标实现
+
+### v1.0.0
+- 基础RAG系统实现
+- 向量检索功能
+- Streamlit Web界面

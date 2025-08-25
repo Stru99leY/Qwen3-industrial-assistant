@@ -32,3 +32,6 @@ pandas>=2.1.4
 # 可视化
 matplotlib>=3.8.2
 seaborn>=0.13.0
+
+# 评分系统
+dataclasses
