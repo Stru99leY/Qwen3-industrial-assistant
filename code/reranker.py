@@ -280,5 +280,3 @@ class RerankerRetriever(BaseRetriever):
                 final_docs = vector_docs[:self._top_k_final]  # 出错时返回前top_k_final个文档
 
         return final_docs
-
-# 评估器已移至独立的scoring_system.py模块
