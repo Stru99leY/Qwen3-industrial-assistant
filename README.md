@@ -1,149 +1,106 @@
-# Qwen3-Reranker 工业知识问答系统
+# Qwen3-Reranker 工业知识问答系统 v3.0
 
-## 项目简介
 
-本项目实现了基于Qwen3-Reranker-0.6B模型的工业知识问答系统，采用模块化架构设计，专注于核心的问答功能。
+## 🏗️ 架构特点
 
-## 系统架构
+### 1. 模块化设计
+- **reranker.py**: 专注于文档重排序功能
+- **scoring_system.py**: 独立的评分系统，支持多种评分策略
+- **scoring_display.py**: 完整的前端评分数据展示
+- **app.py**: 主应用，集成所有模块
 
-### 核心模块
+### 2. 评分系统优势(目前还有问题，需要解决)
+- ✅ 评分功能完全独立，不依赖特定检索器
+- ✅ 支持多种评分策略（Reranker、语义相似度等）
+- ✅ 统一的评分接口和结果格式
+- ✅ 完整的评估指标（Precision、Recall、F1、MRR、NDCG）
 
-1. **Reranker模块** (`code/reranker.py`)
-   - `RerankerModel`: 基于Qwen3-Reranker的文档重排序模型
-   - `RerankerRetriever`: 结合向量检索和重排序的检索器
+### 3. 前端展示增强
+- 📊 评分仪表板：总览、统计、Ground Truth分析
+- 📈 实时评分数据展示
+- ⚡ 性能指标监控
+- 🔍 评分历史记录和趋势分析
 
-2. **主应用** (`code/app.py`)
-   - Streamlit Web界面
-   - 集成Reranker模块
-   - 支持连续对话和智能索引管理
+## 🎯 主要改进
 
-## 主要特性
+1. **解耦评分逻辑**: 从reranker中移除评估代码
+2. **统一评分接口**: 所有评分器实现相同接口
+3. **完整数据展示**: 评分数据完整展示在前端
+4. **性能监控**: 实时监控评分系统性能
+5. **灵活配置**: 支持启用/禁用不同评分器
 
-### 🎯 核心问答功能
-- 基于PDF文档的知识库问答
-- 支持连续对话，历史感知检索
-- 智能文档检索和重排序
+## 🚀 使用方法
 
-### 🚀 Reranker增强
-- 基于Qwen3-Reranker-0.6B模型
-- 两阶段检索：向量检索 + 重排序
-- 提高文档相关性准确性
+1. 启动应用: `streamlit run app.py`
+2. 在侧边栏导入评估数据
+3. 启用Reranker模型
+4. 点击"📊 评分仪表板"查看完整数据
+5. 使用人工评估功能
 
-### 🛠️ 智能索引管理
-- 自动检测索引维度匹配
-- 一键重建损坏的索引
-- 支持强制重建索引
+## 📁 文件结构
 
-### ⚙️ 灵活配置
-- 支持启用/禁用Reranker模型
-- 支持GPU/CPU切换
-- 简洁的用户界面
-
-## 快速开始
-
-### 1. 安装依赖
-
-```bash
-pip install -r requirements.txt
+```
+code/
+├── app.py              # 主应用
+├── reranker.py         # 重排序模块（已重构）
+├── scoring_system.py   # 独立评分系统
+├── scoring_display.py  # 评分展示组件
+├── main.py            # 文档处理
+└── test_reranker.py   # 测试文件
 ```
 
-### 2. 启动应用
+## 🔧 技术特性
 
+- 基于Qwen3-Reranker-0.6B模型
+- 支持GPU/CPU切换
+- 批处理优化
+- 实时性能监控
+- 完整的错误处理
+
+## 🚨 常见问题解决
+
+### FAISS索引维度不匹配错误
+
+如果遇到 `assert d == self.d` 错误，这通常是由于：
+1. 嵌入模型版本更新导致维度变化
+2. 索引文件损坏或不完整
+3. 不同环境间的模型差异
+
+**紧急解决方案：**
+
+1. **立即修复**：运行 `python emergency_fix.py` 删除损坏索引
+2. **强制重建**：在侧边栏勾选"强制重建索引"并刷新页面
+3. **手动重建**：在侧边栏点击"🔄 重建知识库索引"
+4. **命令行工具**：运行 `python fix_index.py` 进行索引管理
+
+**推荐解决步骤：**
 ```bash
+# 1. 停止当前运行的Streamlit应用
+# 2. 运行紧急修复脚本
 cd code
+python emergency_fix.py
+
+# 3. 重新启动应用
 streamlit run app.py
 ```
 
-### 3. 使用系统
+**索引管理工具功能：**
+- 检查索引状态
+- 备份现有索引
+- 删除损坏索引
+- 恢复备份索引
 
-1. 启用Reranker模型进行文档重排序
-2. 在聊天界面输入问题
-3. 系统自动检索相关文档并生成答案
-4. 支持连续对话，系统会记住对话历史
+## 📁 完整文件结构
 
-
-
-### 基本用法
-
-```python
-from reranker import RerankerModel, RerankerRetriever
-
-# 创建Reranker模型
-reranker = RerankerModel("Qwen/Qwen3-Reranker-0.6B")
-
-# 创建增强检索器
-retriever = RerankerRetriever(
-    vector_retriever=base_retriever,
-    reranker=reranker,
-    top_k_vector=20,
-    top_k_final=5
-)
-
-## 性能优化
-
-### 批处理配置
-- 调整`batch_size`参数优化内存使用
-- 根据GPU显存调整`max_length`参数
-- 支持CPU回退，确保系统稳定性
-
-### 检索优化
-- 两阶段检索：向量检索 + 重排序
-- 可配置检索数量：`top_k_vector` 和 `top_k_final`
-- 智能索引管理，自动检测和重建
-
-## 故障排除
-
-### 常见问题
-
-1. **CUDA内存不足**
-   - 减小`batch_size`参数
-   - 使用CPU模式运行
-
-2. **Reranker模型未加载**
-   - 检查模型是否正确下载
-   - 确认设备配置（GPU/CPU）
-
-3. **FAISS索引维度不匹配**
-   - 使用"强制重建索引"选项
-   - 运行`python emergency_fix.py`脚本
-
-### 调试模式
-
-启用详细日志输出：
-```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
 ```
-
-## 贡献指南
-
-欢迎提交Issue和Pull Request来改进项目：
-
-1. Fork项目
-2. 创建特性分支
-3. 提交更改
-4. 推送到分支
-5. 创建Pull Request
-
-## 许可证
-
-本项目采用MIT许可证，详见LICENSE文件。
-
-## 更新日志
-
-### v3.0.0 (当前版本)
-- ✨ 重构系统架构，专注于核心问答功能
-- 🎯 集成Reranker增强检索
-- 🔧 智能索引管理，自动检测和重建
-- 🚀 支持连续对话，历史感知检索
-- 💻 简洁的用户界面，易于使用
-
-### v2.0.0
-- 集成Qwen3-Reranker模型
-- 支持文档重排序功能
-- 基础评估指标实现
-
-### v1.0.0
-- 基础RAG系统实现
-- 向量检索功能
-- Streamlit Web界面
+code/
+├── app.py                    # 主应用
+├── reranker.py              # 重排序模块
+├── scoring_system.py        # 独立评分系统
+├── scoring_display.py       # 评分展示组件
+├── test_scoring_system.py   # 评分系统测试
+├── fix_index.py             # 索引修复工具
+├── emergency_fix.py         # 紧急修复脚本
+├── main.py                  # 文档处理
+└── test_reranker.py         # 原有测试文件
+```
