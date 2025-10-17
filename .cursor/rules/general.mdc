@@ -1,0 +1,208 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+# Qwen3 工业知识问答系统 项目规则（AIProject）
+
+本规则适用于 `d:\HUT\WORK\AIProject`，覆盖运行方式、环境依赖、索引管理、开发约定与常见问题处理，辅助在 Cursor 中高效协作与迭代。
+
+---
+
+## 1. 项目概览
+
+### 架构特点
+- **模块化设计**: 项目已完成重构，采用清晰的模块化架构
+- **核心应用**: `src/app/app.py`（Streamlit 前端 + RAG 检索 + Reranker 可选）
+- **文档处理**: `src/ingestion/loader.py`（PDF 切分与加载）
+- **向量库管理**: `src/index/vector_store.py`（FAISS 索引构建/加载）
+- **检索链**: `src/retrieval/rag_chain.py`（RAG 对话链构建）
+- **重排序模块**: `src/reranker/model.py`、`src/reranker/retriever.py`（Qwen3-Reranker 模型与检索器）
+- **通用工具**: `src/common/paths.py`、`src/common/logging.py`（路径管理与日志）
+- **数据位置**: `data/file`（PDF）、`data/INDEX`（FAISS 索引）
+
+### 重构状态
+- ✅ 已完成从 `code/` 到 `src/` 的模块化重构
+- ✅ 旧 `code/` 目录已清空（仅保留 `__pycache__` 和空目录）
+- ✅ 采用标准 Python 包结构，每个模块都有 `__init__.py`
+- ✅ 测试结构已建立，镜像 `src/` 目录结构
+
+---
+
+## 2. 运行方式
+
+### 推荐启动方式（应用界面）
+在项目根目录执行：
+```bash
+streamlit run src/app/app.py
+```
+- 首次或索引缺失/不匹配时，应用会自动构建 `data/INDEX`
+- 支持侧边栏配置：强制重建索引、启用 Reranker、GPU 加速等
+
+### 开发与测试
+- **自检工具**: `python tools/selfcheck.py`（检查基础结构完整性）
+- **单元测试**: 运行 `tests/` 目录下对应模块的测试文件
+- **变更记录**: 使用 `python tools/changelog/create_change_doc.py` 创建变更文档
+
+---
+
+## 3. 环境依赖
+
+### 核心依赖
+参见根目录 `requirements.txt`，关键依赖包括：
+- **前端**: Streamlit >= 1.30.0
+- **RAG框架**: LangChain（core/community/huggingface）>= 0.1.0
+- **向量数据库**: FAISS-CPU >= 1.7.4
+- **文档处理**: PyPDF2 >= 3.0.0, pdfminer.six >= 20221105
+- **嵌入模型**: Transformers >= 4.36.2, Torch >= 2.1.2
+- **LLM服务**: Ollama >= 0.1.5
+
+### 模型要求
+本地需安装并运行 Ollama，确保模型已拉取：
+```bash
+ollama pull qwen3:8b
+# 如需要其他模型：
+ollama pull deepseek-r1:latest
+```
+
+### Python 版本
+建议使用 Python 3.10/3.11，确保与 `torch` 版本兼容。
+
+---
+
+## 4. 数据与索引
+
+### 数据目录结构
+- **PDF 存放目录**: `data/file`
+- **向量库目录**: `data/INDEX`
+- **嵌入模型**: `Qwen/Qwen3-Embedding-0.6B`
+
+### 索引管理
+- 通过 `src/common/paths.py` 中的 `get_project_root()` 统一路径管理
+- 索引构建/加载统一通过 `src/index/vector_store.py` 的 `create_or_load_vector_store()` 接口
+- 支持批处理写入与本地持久化（`FAISS.save_local()`/`load_local()`）
+- 确保构建与查询阶段使用同一嵌入模型实例，避免维度不匹配
+
+---
+
+## 5. Reranker 使用
+
+### 模型配置
+- **Reranker 模型**: `Qwen/Qwen3-Reranker-0.6B`
+- **应用侧边栏控制**:
+  - "启用 Reranker 模型"开关
+  - "使用 GPU 加速"选项（若 CUDA 不可用将自动回退 CPU）
+
+### 检索策略
+- **启用 Reranker**: 两阶段检索（向量检索 K=20 → Reranker 重排取前 K=5）
+- **关闭 Reranker**: 直接使用向量检索结果
+- **批处理优化**: 支持批量处理文档，提升性能
+
+---
+
+## 6. 常见问题与修复
+
+### FAISS 维度不匹配错误
+遇到 `assert d == self.d` 错误时的修复优先级：
+
+1. **应用内修复**: 在侧边栏勾选"强制重建索引"并刷新页面
+2. **手动重建**: 点击侧边栏"🔄 重建知识库索引"按钮
+3. **命令行工具**: 运行 `python tools/selfcheck.py` 检查结构完整性
+4. **数据清理**: 手动删除 `data/INDEX` 目录，重新启动应用
+
+### 模块导入问题
+- 确保在项目根目录运行应用
+- 检查 `src/` 目录下各模块的 `__init__.py` 文件是否存在
+- 使用 `python tools/selfcheck.py` 验证基础结构
+
+---
+
+## 7. 开发规范
+
+### 模块化架构
+- **边界清晰**: `app` 仅调用业务模块暴露的接口
+- **依赖关系**: 各业务模块仅依赖 `common`，`common` 不反向依赖业务模块
+- **接口统一**: 保持各模块接口的向后兼容性
+
+### 代码规范
+- **路径管理**: 统一通过 `src/common/paths.py` 的 `get_project_root()` 获取项目根路径
+- **日志记录**: 使用 `src/common/logging.py` 的 `log()` 函数，保持结构化日志
+- **异常处理**: 捕获异常时输出上下文与栈信息，保留原始异常语义
+- **UI 文案**: 保持中文一致性，遵循现有 Streamlit 约定
+
+### 变更管理
+- **变更记录**: 各模块下建立 `changes/` 目录，命名格式：`YYYYMMDD_变更类型_文件名.md`
+- **变更类型**: 新增/修改/删除
+- **影响评估**: 记录变更原因和影响范围，标识是否需要回归测试
+
+---
+
+## 8. Streamlit 约定
+
+### 状态管理
+- 使用 `st.session_state` 管理跨交互状态
+- 关键状态：`use_reranker`、`use_gpu`、`force_rebuild_index`
+- 配置变更后使用 `st.rerun()` 应用生效
+
+### 用户体验
+- 长耗时操作显示 `st.spinner()` 和提示信息
+- 关键节点使用 `st.success()`/`st.warning()`/`st.error()` 反馈
+- 保持界面响应性和操作流畅性
+
+---
+
+## 9. 测试与验证
+
+### 测试结构
+- 镜像 `src/` 目录结构：`tests/<module>/test_<module>.py`
+- 测试资源集中管理：`tests/resources/<module>/`
+- 当前测试文件为占位符，需要补充具体测试用例
+
+### 开发建议
+- 新增功能时同步编写对应测试
+- 使用 `python tools/selfcheck.py` 验证基础结构完整性
+- 重要变更后进行回归测试
+
+---
+
+## 10. 项目工具
+
+### 自检工具
+- `python tools/selfcheck.py`: 检查基础结构完整性
+- 验证关键文件和目录是否存在
+- 发现问题时提供清晰的错误信息
+
+### 变更管理
+- `tools/changelog/create_change_doc.py`: 创建标准化变更文档
+- 支持命令行参数指定模块、变更类型、原因等
+- 便于追踪项目演进历史
+
+---
+
+## 11. 最小上手清单
+
+1. **环境准备**: `pip install -r requirements.txt`
+2. **模型准备**: `ollama pull qwen3:8b`
+3. **数据准备**: 将 PDF 文件放到 `data/file` 目录
+4. **结构检查**: `python tools/selfcheck.py`
+5. **启动应用**: `streamlit run src/app/app.py`
+6. **问题排查**: 如遇维度错误，使用侧边栏"强制重建索引"
+
+---
+
+## 12. 在 Cursor 中协作的规则
+
+### 代码引用
+- 统一称呼为"编辑/edits"，避免"补丁/patches"表述
+- 引用现有文件/函数/类时使用反引号包裹名称，例如：`src/app/app.py`、`create_or_load_vector_store()`
+- 对现有代码的展示使用代码引用定位到具体行；新提案使用标准 Markdown 代码块
+
+### 提交前检查
+- 不引入语法/风格错误
+- 不改变与需求无关的格式化
+- 不提交大体积二进制或索引产物
+- 确保新增功能有对应的测试用例
+
+---
+
+如需扩展功能（如评分系统、性能监控等），请先创建对应模块文件并遵守本规则中的"开发规范"和"模块化架构"约定。

@@ -31,7 +31,7 @@
 
 ## 🚀 使用方法
 
-1. 启动应用: `streamlit run app.py`
+1. 启动应用: `streamlit run src/app/app.py`
 2. 在侧边栏导入评估数据
 3. 启用Reranker模型
 4. 点击"📊 评分仪表板"查看完整数据
@@ -40,13 +40,12 @@
 ## 📁 文件结构
 
 ```
-code/
-├── app.py              # 主应用
-├── reranker.py         # 重排序模块（已重构）
-├── scoring_system.py   # 独立评分系统
-├── scoring_display.py  # 评分展示组件
-├── main.py            # 文档处理
-└── test_reranker.py   # 测试文件
+src/
+├── app/app.py            # 重构后入口（Streamlit）
+├── ingestion/loader.py   # 文档加载与切分
+├── index/vector_store.py # 向量库构建与加载
+├── retrieval/rag_chain.py# 检索与对话链
+└── reranker/*            # 重排序模型与检索器
 ```
 
 ## 🔧 技术特性
@@ -81,7 +80,7 @@ cd code
 python emergency_fix.py
 
 # 3. 重新启动应用
-streamlit run app.py
+streamlit run src/app/app.py
 ```
 
 **索引管理工具功能：**
